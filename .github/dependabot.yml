@@ -1,0 +1,37 @@
+---
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# SPDX-License-Identifier: Apache-2.0
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "CI(actions)"
+    # Wait before opening a bump PR so we don't churn on a release that
+    # gets retracted or superseded shortly after it ships.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 15
+
+  # aislop version pin. package.json declares a single dependency
+  # (aislop) and package-lock.json locks it with integrity hashes; the
+  # action reads the pinned version from package.json at run time and
+  # installs with `npm ci` so the hashes verify the download. The npm
+  # ecosystem keeps the pin current. Scheduled for Sunday evening UTC.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "22:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "Chore(deps)"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-name: "aislop"

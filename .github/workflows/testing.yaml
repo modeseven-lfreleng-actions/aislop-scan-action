@@ -1,0 +1,91 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Self-test: run this repository's composite action against its own
+# source tree. Uses the local action via './'. Pull requests scan the
+# changed files against the base branch; pushes and manual runs scan
+# the full repository.
+name: "Test GitHub Action 🧪"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  self-scan:
+    name: "Self scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The self-test does not upload SARIF (see the scan step below),
+      # so it needs only read access to the repository contents.
+      contents: read
+    steps:
+      # Load the egress allow-list out-of-band from the
+      # organisation's .github repository and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@807a544b7e55a9224b2b3780e636467bd4b5b99b'  # v0.5.0
+
+      # Harden the runner with the just-loaded allow-list.
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # Full history so changes mode can resolve the merge base of
+          # the pull request branch against the base branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "Run aislop scan"
+        id: "scan"
+        uses: "./"
+        with:
+          # yamllint disable-line rule:line-length
+          scan-mode: ${{ github.event_name == 'pull_request' && 'changes' || 'full' }}
+          # yamllint disable-line rule:line-length
+          base: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # The scheduled org-wide publisher (lfreleng-actions/.github)
+          # is the single source of code-scanning SARIF for every
+          # repository, including this one. This self-test only
+          # verifies the action runs end to end, so it must not upload
+          # a second, competing analysis lineage to code scanning.
+          upload-sarif: "false"
+
+      - name: "Verify action outputs"
+        shell: "bash"
+        env:
+          REPORT: ${{ steps.scan.outputs.report-file }}
+          SARIF: ${{ steps.scan.outputs.sarif-file }}
+          SCORE: ${{ steps.scan.outputs.score }}
+          EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+        run: |
+          # Verify action outputs
+          set -euo pipefail
+          test -s "${REPORT}"
+          test -s "${SARIF}"
+          echo "report: ${REPORT}"
+          echo "sarif: ${SARIF}"
+          echo "score: ${SCORE:-<not scoreable>}"
+          echo "gate exit code: ${EXIT_CODE}"

@@ -1,0 +1,62 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Example: per-repository opt-in caller.
+#
+# Copy this into a repository's .github/workflows/ to scan that
+# repository's pull request changes and to publish full-repository
+# SARIF to code scanning on default-branch pushes. The single job holds
+# `security-events: write`, used by the action's upload step on
+# default-branch pushes.
+#
+# Pin the action to a commit SHA and record the version in a comment.
+
+name: 'AI Slop Scan 🧹'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+  push:
+
+permissions: {}
+
+jobs:
+  aislop:
+    name: 'Scan for AI slop'
+    if: >-
+      github.event_name != 'push'
+      || github.ref_name == github.event.repository.default_branch
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      # upload-sarif reads workflow run info on private repositories.
+      actions: read
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository under audit'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # Full history so changes mode can resolve the merge base of
+          # the pull request branch against the base branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Run aislop scan'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/aislop-scan-action@0000000000000000000000000000000000000000  # vX.Y.Z
+        with:
+          # yamllint disable-line rule:line-length
+          scan-mode: ${{ github.event_name == 'pull_request' && 'changes' || 'full' }}
+          # yamllint disable-line rule:line-length
+          base: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # yamllint disable-line rule:line-length
+          upload-sarif: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}

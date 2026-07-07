@@ -1,0 +1,13 @@
+{
+  "name": "aislop-scan-action-pin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Version pin for the aislop CLI run by this composite action.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "aislop": "0.13.1"
+  }
+}

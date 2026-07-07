@@ -1,0 +1,247 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Composite action that runs the aislop AI-slop / code-quality scanner.
+#
+# The action reads its pinned aislop version from its own bundled
+# package.json and installs it with `npm ci` against the bundled
+# package-lock.json (both via ${{ github.action_path }}; the runner
+# checks this action out at the pinned ref for the caller), so the
+# integrity hashes in the lock file verify the npm download. The scan
+# writes a JSON report and a SARIF file, renders a step summary with
+# the bundled parser, and publishes the SARIF to code scanning on
+# request.
+#
+# The scan step never fails the job on findings: the exit-code output
+# carries the aislop gate result so callers decide enforcement. The
+# action fails when the tool itself breaks (no readable JSON report).
+#
+# The caller is responsible for checking out the repository under
+# audit (with fetch-depth: 0 when scan-mode is "changes" and base
+# names a branch) and for hardening the runner.
+
+name: 'AI Slop Scan'
+description: 'Scan code for AI slop and quality issues with the aislop CLI.'
+
+inputs:
+  scan-mode:
+    description: >-
+      Scan scope: "changes" audits files changed relative to base;
+      "full" audits the whole working tree.
+    required: false
+    default: 'changes'
+  base:
+    description: >-
+      Git ref that changes compare against in changes mode (for
+      example origin/main). Empty compares against HEAD.
+    required: false
+    default: ''
+  working-directory:
+    description: 'Path within the workspace to scan.'
+    required: false
+    default: '.'
+  aislop-version:
+    description: >-
+      Override the bundled pin with an explicit version (for example
+      0.13.1). An override bypasses the bundled lock file and its
+      integrity data.
+    required: false
+    default: ''
+  extra-args:
+    description: 'Additional raw arguments appended to the aislop call.'
+    required: false
+    default: ''
+  annotate:
+    description: >-
+      Emit inline annotations for the top findings: 'true' or 'false'.
+    required: false
+    default: 'true'
+  upload-sarif:
+    description: 'Upload the SARIF to code scanning from within this action.'
+    required: false
+    default: 'false'
+
+outputs:
+  sarif-file:
+    description: 'Absolute path to the generated SARIF file.'
+    value: ${{ steps.scan.outputs.sarif }}
+  report-file:
+    description: 'Absolute path to the generated JSON report.'
+    value: ${{ steps.scan.outputs.report }}
+  score:
+    description: 'aislop score (0-100); empty when not scoreable.'
+    value: ${{ steps.scan.outputs.score }}
+  exit-code:
+    description: >-
+      Exit code of the aislop quality gate: '0' when the gate passes,
+      non-zero when it holds findings below the configured threshold.
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Resolve aislop version'
+      id: 'resolve'
+      shell: 'bash'
+      env:
+        OVERRIDE: ${{ inputs.aislop-version }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [ -n "${OVERRIDE}" ]; then
+          ver="${OVERRIDE#v}"
+          locked='false'
+          src='aislop-version input (bundled lock file bypassed)'
+        else
+          ver="$(jq -r '.dependencies.aislop' "${ACTION_PATH}/package.json")"
+          locked='true'
+          src='bundled package.json pin'
+        fi
+        if ! printf '%s' "${ver}" \
+             | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+          echo "error: invalid aislop version '${ver}'" >&2
+          exit 1
+        fi
+        {
+          echo "version=${ver}"
+          echo "locked=${locked}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Using aislop ${ver} (from ${src})"
+
+    - name: 'Install aislop'
+      id: 'install'
+      shell: 'bash'
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        VERSION: ${{ steps.resolve.outputs.version }}
+        LOCKED: ${{ steps.resolve.outputs.locked }}
+      run: |
+        set -euo pipefail
+        # Install under a randomised temporary directory so node_modules
+        # never lands in the audited workspace; the cleanup step removes
+        # the whole directory. The package postinstall step fetches the
+        # bundled engine binaries (for example ruff and golangci-lint)
+        # from GitHub releases.
+        work="$(mktemp -d "${RUNNER_TEMP}/aislop.XXXXXX")"
+        echo "workdir=${work}" >> "$GITHUB_OUTPUT"
+        if [ "${LOCKED}" = 'true' ]; then
+          # npm ci verifies every download against the integrity
+          # hashes committed in the bundled package-lock.json.
+          cp "${ACTION_PATH}/package.json" \
+             "${ACTION_PATH}/package-lock.json" "${work}/"
+          (cd "${work}" && npm ci --no-audit --no-fund --loglevel=error)
+        else
+          (cd "${work}" && npm install --no-audit --no-fund \
+            --loglevel=error "aislop@${VERSION}")
+        fi
+        bin="${work}/node_modules/.bin/aislop"
+        if [ ! -x "${bin}" ]; then
+          echo 'error: aislop binary not found after install' >&2
+          exit 1
+        fi
+        echo "aislop=${bin}" >> "$GITHUB_OUTPUT"
+        "${bin}" -V
+
+    - name: 'Run aislop scan (advisory)'
+      id: 'scan'
+      shell: 'bash'
+      env:
+        AISLOP_NO_TELEMETRY: '1'
+        AISLOP_NO_HISTORY: '1'
+        AISLOP_BIN: ${{ steps.install.outputs.aislop }}
+        SCAN_MODE: ${{ inputs.scan-mode }}
+        BASE: ${{ inputs.base }}
+        WORKDIR: ${{ inputs.working-directory }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -euo pipefail
+        case "${SCAN_MODE}" in
+          changes|full) ;;
+          *)
+            echo "error: invalid scan-mode '${SCAN_MODE}';" \
+                 "expected 'changes' or 'full'" >&2
+            exit 1
+            ;;
+        esac
+        args=(ci)
+        scope='full repository'
+        if [ "${SCAN_MODE}" = 'changes' ]; then
+          args+=(--changes)
+          scope='changed files vs HEAD'
+          if [ -n "${BASE}" ]; then
+            args+=(--base "${BASE}")
+            scope="changed files vs ${BASE}"
+          fi
+        fi
+        # Write outputs into a fresh directory outside the audited
+        # workspace so the scan never leaves untracked files behind
+        # in the caller's working tree.
+        out="$(mktemp -d "${RUNNER_TEMP}/aislop-out.XXXXXX")"
+        report="${out}/aislop-report.json"
+        sarif="${out}/aislop.sarif"
+        # aislop exits non-zero when its quality gate fails; capture the
+        # exit code and leave pass/fail policy to the caller. The second
+        # run reuses the installed CLI, so the SARIF costs only a rescan
+        # of the same working tree.
+        # Word-splitting of EXTRA_ARGS is intentional (passthrough).
+        # shellcheck disable=SC2086
+        rc=0
+        (cd "${WORKDIR}" \
+          && "${AISLOP_BIN}" "${args[@]}" ${EXTRA_ARGS} > "${report}") \
+          || rc=$?
+        # shellcheck disable=SC2086
+        (cd "${WORKDIR}" \
+          && "${AISLOP_BIN}" "${args[@]}" --sarif ${EXTRA_ARGS} \
+          > "${sarif}") || true
+        echo "aislop exit code: ${rc}"
+        # Both outputs must be valid JSON; anything else means the tool
+        # itself failed rather than reported findings.
+        jq -e . "${report}" > /dev/null
+        jq -e . "${sarif}" > /dev/null
+        score="$(jq -r '.score // empty' "${report}")"
+        {
+          echo "report=${report}"
+          echo "sarif=${sarif}"
+          echo "score=${score}"
+          echo "exit-code=${rc}"
+          echo "scope=${scope}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: 'Render step summary'
+      if: ${{ steps.scan.outcome == 'success' }}
+      shell: 'bash'
+      env:
+        AISLOP_JSON: ${{ steps.scan.outputs.report }}
+        AISLOP_SCOPE: ${{ steps.scan.outputs.scope }}
+        AISLOP_ANNOTATE: ${{ inputs.annotate }}
+        AISLOP_TOP_N: '10'
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        python3 "${ACTION_PATH}/.github/scripts/aislop_summary.py"
+
+    - name: 'Upload SARIF to code scanning'
+      if: >-
+        ${{ inputs.upload-sarif == 'true'
+        && steps.scan.outcome == 'success' }}
+      # yamllint disable-line rule:line-length
+      uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif }}
+        # Category groups these results in code scanning.
+        category: 'aislop'
+      # A transient code-scanning API error must not fail an advisory
+      # scan; the SARIF remains available as an output for retry.
+      continue-on-error: true
+
+    - name: 'Clean up temporary files'
+      if: always()
+      shell: 'bash'
+      env:
+        TMP_WORKDIR: ${{ steps.install.outputs.workdir }}
+      run: |
+        set -euo pipefail
+        if [ -n "${TMP_WORKDIR:-}" ] && [ -d "${TMP_WORKDIR}" ]; then
+          rm -rf "${TMP_WORKDIR}"
+        fi

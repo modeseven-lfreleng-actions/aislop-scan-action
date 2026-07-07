@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# aislop quality gate configuration.
+#
+# The default pass threshold is 75; this repository scores 100/100,
+# so hold the bar there and fail the gate on any regression. The
+# pre-commit hook and the self-test workflow both apply this gate.
+ci:
+  failBelow: 100
