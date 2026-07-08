@@ -18,6 +18,7 @@ Configuration comes from the environment:
 
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -43,12 +44,7 @@ def _escape_wf_data(value: object) -> str:
     Per GitHub's workflow-command rules, ``%``, ``CR`` and ``LF`` must
     be percent-encoded in the data (post-``::``) portion.
     """
-    return (
-        str(value)
-        .replace("%", "%25")
-        .replace("\r", "%0D")
-        .replace("\n", "%0A")
-    )
+    return str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def _escape_wf_property(value: object) -> str:
@@ -62,9 +58,7 @@ def _escape_wf_property(value: object) -> str:
     return _escape_wf_data(value).replace(":", "%3A").replace(",", "%2C")
 
 
-def _render_link(
-    file: str, line: int | None, repo: str, sha: str, server: str
-) -> str:
+def _render_link(file: str, line: int | None, repo: str, sha: str, server: str) -> str:
     """Render a path:line link with the basename as visible text."""
     if not file:
         return ""
@@ -140,27 +134,63 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+# The repo segment must not be all dots ("." / "..") so a "valid"
+# override can never URL-normalise into a different blob-link path.
+# Owner: alphanumeric with inner hyphens/underscores (underscores
+# appear in Enterprise Managed User logins); no dots, no leading or
+# trailing separator. Repo: must not be all dots ("." / "..") so a
+# "valid" override can never URL-normalise into a different
+# blob-link path.
+_REPO_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?"
+    r"/(?!\.+$)[A-Za-z0-9._-]+$"
+)
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def _label_overrides() -> tuple[str, str]:
+    """Read and validate the summary label override pair.
+
+    ``AISLOP_REPOSITORY`` and ``AISLOP_SHA`` override the ambient
+    GitHub values so summaries can label a checkout of a different
+    repository (for example in an organisation-wide scan matrix).
+    The pair applies atomically and each value must be well formed
+    (``owner/repo``; 7-40 hex-digit SHA): a partial or malformed
+    override would mislabel the summary or break its links, so it is
+    ignored with a warning.
+    """
+    repo = os.environ.get("AISLOP_REPOSITORY", "").strip()
+    sha = os.environ.get("AISLOP_SHA", "").strip()
+    if not repo and not sha:
+        return "", ""
+    if not (_REPO_RE.match(repo) and _SHA_RE.match(sha)):
+        print(
+            "::warning::AISLOP_REPOSITORY and AISLOP_SHA must be set"
+            " together as owner/repo and a 7-40 hex-digit commit SHA;"
+            " ignoring the override"
+        )
+        return "", ""
+    return repo, sha
+
+
 def _read_context() -> dict[str, Any]:
     """Collect configuration and repository context from the env."""
-    sha = os.environ.get("GITHUB_SHA", "")
+    repo_override, sha_override = _label_overrides()
+    sha = sha_override or os.environ.get("GITHUB_SHA", "")
     return {
         "json_path": Path(os.environ["AISLOP_JSON"]),
         "top_n": _int_env("AISLOP_TOP_N", 10),
         "scope": os.environ.get("AISLOP_SCOPE", ""),
         "annotate": os.environ.get("AISLOP_ANNOTATE", "") == "true",
         "summary_path": os.environ.get("GITHUB_STEP_SUMMARY"),
-        "server": os.environ.get(
-            "GITHUB_SERVER_URL", "https://github.com"
-        ),
-        "repo": os.environ.get("GITHUB_REPOSITORY", ""),
+        "server": os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
+        "repo": repo_override or os.environ.get("GITHUB_REPOSITORY", ""),
         "sha": sha,
         "short_sha": sha[:7] if sha else "?",
     }
 
 
-def _render_header(
-    data: dict[str, Any], total: int, ctx: dict[str, Any]
-) -> list[str]:
+def _render_header(data: dict[str, Any], total: int, ctx: dict[str, Any]) -> list[str]:
     """Render the score line, scan context, and finding totals."""
     counts = data.get("summary")
     if not isinstance(counts, dict):
@@ -217,9 +247,7 @@ def _render_breakdowns(
     out.append("| --- | ---: |")
     for lvl in LEVEL_ORDER:
         if lvl in level_counts:
-            out.append(
-                f"| {LEVEL_LABEL.get(lvl, lvl)} | {level_counts[lvl]} |"
-            )
+            out.append(f"| {LEVEL_LABEL.get(lvl, lvl)} | {level_counts[lvl]} |")
     out.extend(["", "## Counts by rule", "", "| Rule | Count |"])
     out.append("| --- | ---: |")
     for rid, n in rule_counts.most_common():
@@ -228,9 +256,7 @@ def _render_breakdowns(
     return out
 
 
-def _render_findings_table(
-    findings: list[Finding], ctx: dict[str, Any]
-) -> list[str]:
+def _render_findings_table(findings: list[Finding], ctx: dict[str, Any]) -> list[str]:
     """Render the detail table for the top findings."""
     total = len(findings)
     shown = findings[: ctx["top_n"]]
@@ -246,13 +272,8 @@ def _render_findings_table(
         msg = f["msg"].replace("|", "\\|").replace("\n", " ")
         if len(msg) > MAX_MSG_LEN:
             msg = msg[: MAX_MSG_LEN - 3] + "..."
-        loc = _render_link(
-            f["file"], f["line"], ctx["repo"], ctx["sha"], ctx["server"]
-        )
-        out.append(
-            f"| {lvl_label} | `{f['engine']}` | `{f['rule']}` "
-            f"| {loc} | {msg} |"
-        )
+        loc = _render_link(f["file"], f["line"], ctx["repo"], ctx["sha"], ctx["server"])
+        out.append(f"| {lvl_label} | `{f['engine']}` | `{f['rule']}` | {loc} | {msg} |")
     return out
 
 

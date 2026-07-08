@@ -123,15 +123,17 @@ pull request, gate on the `exit-code` output in a follow-up step:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                | Default     | Description                                                                              |
-| ------------------- | ----------- | ---------------------------------------------------------------------------------------- |
-| `scan-mode`         | `changes`   | Scan scope: `changes` audits files changed relative to `base`; `full` audits everything. |
-| `base`              | `""`        | Git ref changes compare against (for example `origin/main`). Empty compares to HEAD.     |
-| `working-directory` | `.`         | Path within the workspace to scan.                                                       |
-| `aislop-version`    | `""`        | Override the bundled pin (for example `0.13.1`). Bypasses the bundled lock file.         |
-| `extra-args`        | `""`        | Extra raw arguments appended to the aislop call.                                         |
-| `annotate`          | `'true'`    | Emit inline annotations for the top findings: `'true'` or `'false'`.                     |
-| `upload-sarif`      | `'false'`   | Publish SARIF to code scanning from the action: `'true'` or `'false'`.                   |
+| Name                 | Default   | Description                                                                                   |
+| -------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| `scan-mode`          | `changes` | Scan scope: `changes` audits files changed relative to `base`; `full` audits everything.      |
+| `base`               | `""`      | Git ref changes compare against (for example `origin/main`). Empty compares to HEAD.          |
+| `working-directory`  | `.`       | Path within the workspace to scan.                                                            |
+| `aislop-version`     | `""`      | Override the bundled pin (for example `0.13.1`). Bypasses the bundled lock file.              |
+| `extra-args`         | `""`      | Extra raw arguments appended to the aislop call.                                              |
+| `annotate`           | `'true'`  | Emit inline annotations for the top findings: `'true'` or `'false'`.                          |
+| `upload-sarif`       | `'false'` | Publish SARIF to code scanning from the action: `'true'` or `'false'`.                        |
+| `summary-repository` | `""`      | owner/repo label for step-summary links; takes effect when paired with a valid `summary-sha`. |
+| `summary-sha`        | `""`      | Commit SHA (7–40 hex digits) for step-summary links; pairs with `summary-repository`.         |
 
 <!-- markdownlint-enable MD013 -->
 
